@@ -1,5 +1,5 @@
 [Unit]
-Description=ADBBridge host-side read-only Android bridge
+Description=ADBBridge controlled emulator development bridge
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/adbbridge

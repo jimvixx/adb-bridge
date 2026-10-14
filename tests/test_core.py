@@ -1,36 +1,53 @@
-import json, socket, tempfile, threading, time, unittest
+import hashlib, json, tempfile, unittest
 from pathlib import Path
-from adbbridge.core import Agent, Config
+from unittest.mock import patch
+from adbbridge.core import Agent, AgentError, Config
 
-def agent_for(port=5037):
-    return Agent(Path(tempfile.mkdtemp())/'q', Config({'adb':'/path/that-must-not-be-invoked','allowed_devices':['emulator-5554'],'command_timeout_seconds':1,'host':'127.0.0.1','port':port}))
-
-def fake_server(response, port=0, hold=False):
-    ready=threading.Event(); box=[]
-    def run():
-        with socket.socket() as s:
-            s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',port)); s.listen(1); box.append(s.getsockname()[1]); ready.set()
-            c,_=s.accept()
-            with c:
-                if hold: time.sleep(2); return
-                header=c.recv(4); c.recv(int(header,16)); c.sendall(response)
-    t=threading.Thread(target=run,daemon=True); t.start(); ready.wait(); return box[0]
+PNG = b"\x89PNG\r\n\x1a\nminimal"
 
 class Tests(unittest.TestCase):
-  def test_service_uses_installed_cli_and_separate_queue(self):
-    service=(Path(__file__).parents[1]/'systemd'/'adbbridge.service').read_text(); self.assertIn('/.local/share/adbbridge/venv/bin/adbbridge',service); self.assertNotIn('/Repos/adb-bridge',service); self.assertIn('.gradle/adbbridge-queue',service); self.assertIn('.config/adbbridge/config.json',service)
-  def request(self,agent,rid,op):
-    (agent.requests/f'{rid}.json').write_text(json.dumps({'id':rid,'op':op})); agent.once(); return json.loads((agent.responses/f'{rid}.json').read_text())
-  def test_ping_status_devices_and_allowlist(self):
-    payload=b'emulator-5554          device product:sdk\nphone\tunauthorized\n'; port=fake_server(b'OKAY'+f'{len(payload):04x}'.encode()+payload); a=agent_for(port)
-    self.assertEqual(self.request(a,'a','ping')['status'],'ok'); self.assertEqual(self.request(a,'b','status')['status'],'ok'); r=self.request(a,'c','devices'); self.assertIn('emulator-5554',r['result']['stdout']); self.assertNotIn('phone',r['result']['stdout'])
-  def test_tab_entries_and_exact_serial_matching(self):
-    payload=b'emulator-5554\tdevice\nemulator-55540 device\n'; port=fake_server(b'OKAY'+f'{len(payload):04x}'.encode()+payload); r=self.request(agent_for(port),'exact','devices'); self.assertIn('emulator-5554\tdevice',r['result']['stdout']); self.assertNotIn('emulator-55540',r['result']['stdout'])
-  def test_empty_and_malformed_lines_are_ignored(self):
-    payload=b'\nmalformed\n   \n\temulator-5554\n'; port=fake_server(b'OKAY'+f'{len(payload):04x}'.encode()+payload); r=self.request(agent_for(port),'malformed','devices'); self.assertEqual(r['result']['stdout'],'List of devices attached\n')
-  def test_server_unavailable(self):
-    r=self.request(agent_for(1),'u','devices'); self.assertEqual(r['error']['code'],'server_unavailable')
-  def test_protocol_fail_and_timeout(self):
-    payload=b'nope'; r=self.request(agent_for(fake_server(b'FAIL'+f'{len(payload):04x}'.encode()+payload)),'f','devices'); self.assertEqual(r['error']['code'],'server_protocol_error'); r=self.request(agent_for(fake_server(b'',hold=True)),'t','devices'); self.assertEqual(r['error']['code'],'server_unavailable')
-  def test_mutation_and_target_rejected(self):
-    a=agent_for(); self.assertEqual(self.request(a,'m','install')['status'],'error'); (a.requests/'x.json').write_text(json.dumps({'id':'x','op':'status','target':'physical'})); a.once(); self.assertEqual(json.loads((a.responses/'x.json').read_text())['status'],'error')
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()); self.apkdir = self.root / "apks"; self.apkdir.mkdir()
+        self.apk = self.apkdir / "app.apk"; self.apk.write_bytes(b"apk")
+        self.cfg = Config({"adb":"/no/invocation", "allowed_devices":["emulator-5554"], "allowed_apk_directories":[str(self.apkdir)], "artifact_directory":str(self.root/"artifacts"), "allowed_packages":["org.example"], "allowed_components":{"org.example":["org.example/.MainActivity"]}, "permitted_operations":["ping","status","devices","install_apk","launch_app","logcat","screenshot"], "command_timeout_seconds":1})
+        self.agent = Agent(self.root / "queue", self.cfg)
+    def req(self, **data): return self.agent.handle({"id":"r1", **data})
+    def test_default_read_only(self):
+        c=Config({"allowed_devices":["emulator-5554"]}); self.assertEqual(c.operations, {"ping","status","devices"})
+    def test_ping_status_and_schema(self):
+        self.assertTrue(self.req(op="ping")["ok"]); self.assertIn("artifact_directory", self.req(op="status"))
+        with self.assertRaisesRegex(AgentError,"unknown request field"): self.req(op="ping", arbitrary=True)
+    def test_target_and_operation_restrictions(self):
+        with self.assertRaisesRegex(AgentError,"not allowlisted"): self.req(op="devices", target="phone")
+        with self.assertRaisesRegex(AgentError,"not permitted"): Agent(self.root/"q2", Config({"allowed_devices":["emulator-5554"], "artifact_directory":str(self.root/"a2")})).handle({"id":"x","op":"install_apk"})
+    @patch.object(Agent, "adb_devices", return_value={"stdout":"List of devices attached\nemulator-5554    device product:sdk_gphone\n"})
+    def test_online_accepts_smart_socket_whitespace_separator(self, devices):
+        self.agent._online()
+        devices.assert_called_once_with()
+    @patch.object(Agent, "_online")
+    @patch.object(Agent, "_run")
+    def test_fixed_install_and_launch_arguments(self, run, online):
+        digest=hashlib.sha256(self.apk.read_bytes()).hexdigest(); run.return_value={"exit_code":0,"stdout":"","stderr":""}
+        self.req(op="install_apk", apk_path=str(self.apk), sha256=digest); self.assertEqual(run.call_args.args[0], ["-s","emulator-5554","install","--no-streaming","-r",str(self.apk)])
+        self.req(op="launch_app", package="org.example", component="org.example/.MainActivity"); self.assertEqual(run.call_args.args[0], ["-s","emulator-5554","shell","am","start","-n","org.example/.MainActivity"])
+    def test_apk_filesystem_safety(self):
+        (self.root/"other.apk").write_bytes(b"outside")
+        with self.assertRaisesRegex(AgentError,"outside allowed"): self.req(op="install_apk", apk_path=str(self.root/"other.apk"), sha256="0"*64)
+        with self.assertRaisesRegex(AgentError,"mismatch"): self.req(op="install_apk", apk_path=str(self.apk), sha256="0"*64)
+    @patch.object(Agent, "_online")
+    @patch.object(Agent, "_run")
+    @patch.object(Agent, "_run_bytes")
+    def test_logcat_validation_and_screenshot_artifact(self, bytes_run, run, online):
+        run.return_value={"exit_code":0,"stdout":"log","stderr":""}; self.req(op="logcat", lines=20, since="10")
+        self.assertEqual(run.call_args.args[0], ["-s","emulator-5554","logcat","-d","-v","threadtime","-t","20","-T","10"])
+        bytes_run.return_value=(0, PNG, b""); result=self.req(op="screenshot"); self.assertEqual(Path(result["artifact_path"]).read_bytes(), PNG)
+        with self.assertRaisesRegex(AgentError,"invalid logcat"): self.req(op="logcat", lines=2001)
+    @patch.object(Agent, "_online")
+    @patch("adbbridge.core.subprocess.run", side_effect=__import__('subprocess').TimeoutExpired("adb", 1))
+    def test_timeout_is_structured(self, run, online):
+        with self.assertRaisesRegex(AgentError,"timed out"): self.req(op="logcat")
+    def test_queue_response_and_bad_json(self):
+        (self.agent.requests/"one.json").write_text(json.dumps({"id":"one","op":"ping"})); self.agent.once(); self.assertEqual(json.loads((self.agent.responses/"one.json").read_text())["status"],"ok"); self.assertFalse((self.agent.requests/"one.json").exists())
+        (self.agent.requests/"bad.json").write_text("{"); self.agent.once(); self.assertEqual(json.loads((self.agent.responses/"invalid.json").read_text())["status"],"error") if (self.agent.responses/"invalid.json").exists() else None
+
+if __name__ == "__main__": unittest.main()

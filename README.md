@@ -1,4 +1,10 @@
 # ADBBridge
+
+## Practical emulator MVP
+
+The user service consumes JSON files from `%h/.gradle/adbbridge-queue`. It is deliberately limited to `emulator-5554`; no physical device, arbitrary shell command, key injection, or unrestricted ADB argument is supported. The shipped configuration enables only `ping`, `status`, and `devices`. `install_apk`, `launch_app`, `logcat`, and `screenshot` require explicit configuration opt-in and are constrained by the APK directory, package/component allowlists, bounded output, and the artifact directory.
+
+This MVP has a simplified same-UID trust model: it protects against malformed AI-generated requests and accidental scope expansion, but does not isolate against a malicious process with the same user permissions or queue access. Device discovery uses the localhost ADB Smart Socket and does not auto-start ADB. The fixed subprocess ADB operations may cause the configured ADB client to auto-start the host ADB server; emulator state is never changed by the worker except when an explicitly enabled request is processed.
 ADBBridge is a small host-side file-queue bridge for AI-assisted Android development. The host operator runs the trusted executable; an untrusted sandbox may write request files to a shared queue. Milestone 0 is deliberately read-only.
 
 ## Operations
