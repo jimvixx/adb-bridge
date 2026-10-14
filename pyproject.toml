@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "adbbridge"
+version = "0.1.0"
+description = "Fail-closed file-queue bridge for controlled host-side Android development"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [{name = "ADBBridge contributors"}]
+[project.scripts]
+adbbridge = "adbbridge.cli:main"
+[tool.setuptools.packages.find]
+include = ["adbbridge*"]

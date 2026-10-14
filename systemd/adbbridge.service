@@ -1,0 +1,14 @@
+[Unit]
+Description=ADBBridge host-side read-only Android bridge
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/adbbridge
+ExecStart=%h/.local/share/adbbridge/venv/bin/adbbridge --queue %h/.gradle/adbbridge-queue --config %h/.config/adbbridge/config.json
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.gradle/adbbridge-queue
+[Install]
+WantedBy=default.target
