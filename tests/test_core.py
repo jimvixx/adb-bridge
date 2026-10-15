@@ -14,6 +14,12 @@ class Tests(unittest.TestCase):
     def req(self, **data): return self.agent.handle({"id":"r1", **data})
     def test_default_read_only(self):
         c=Config({"allowed_devices":["emulator-5554"]}); self.assertEqual(c.operations, {"ping","status","devices"})
+
+    def test_lifecycle_config_is_fixed_and_allowlisted(self):
+        c = Config({"permitted_operations":["ping","status","devices","emulator_status","start_emulator"]})
+        self.assertEqual(c.avd_name, "silence-counterpart")
+        with self.assertRaisesRegex(AgentError, "invalid emulator lifecycle"):
+            Config({"emulator_avd":"other"})
     def test_ping_status_and_schema(self):
         self.assertTrue(self.req(op="ping")["ok"]); self.assertIn("artifact_directory", self.req(op="status"))
         with self.assertRaisesRegex(AgentError,"unknown request field"): self.req(op="ping", arbitrary=True)
@@ -49,5 +55,44 @@ class Tests(unittest.TestCase):
     def test_queue_response_and_bad_json(self):
         (self.agent.requests/"one.json").write_text(json.dumps({"id":"one","op":"ping"})); self.agent.once(); self.assertEqual(json.loads((self.agent.responses/"one.json").read_text())["status"],"ok"); self.assertFalse((self.agent.requests/"one.json").exists())
         (self.agent.requests/"bad.json").write_text("{"); self.agent.once(); self.assertEqual(json.loads((self.agent.responses/"invalid.json").read_text())["status"],"error") if (self.agent.responses/"invalid.json").exists() else None
+
+    def test_lifecycle_status_stopped_booting_ready(self):
+        lifecycle = Config({"artifact_directory":str(self.root/"life-artifacts"), "permitted_operations":["ping","status","devices","emulator_status","start_emulator"]})
+        agent = Agent(self.root / "lifecycle", lifecycle)
+        with patch.object(agent, "_emulator_process", return_value=False), patch.object(agent, "adb_devices", return_value={"stdout":"List of devices attached\n"}):
+            self.assertEqual(agent.handle({"id":"s","op":"emulator_status"})["state"], "stopped")
+        with patch.object(agent, "_emulator_process", return_value=True), patch.object(agent, "adb_devices", return_value={"stdout":"List of devices attached\n"}):
+            self.assertEqual(agent.handle({"id":"b","op":"emulator_status"})["state"], "booting")
+        with patch.object(agent, "_emulator_process", return_value=True), patch.object(agent, "adb_devices", return_value={"stdout":"List of devices attached\nemulator-5554 device\n"}), patch.object(agent, "_boot_completed", return_value=True):
+            self.assertEqual(agent.handle({"id":"r","op":"emulator_status"})["state"], "ready")
+
+    @patch("adbbridge.core.subprocess.run")
+    def test_process_detection_accepts_qemu_command(self, run):
+        lifecycle = Config({"artifact_directory":str(self.root/"qemu-artifacts"), "permitted_operations":["ping","status","devices","emulator_status"]})
+        agent = Agent(self.root / "qemu", lifecycle)
+        run.return_value = type("Result", (), {"stdout":"21590 qemu-system-x86_64 -avd silence-counterpart -gpu swiftshader_indirect\n", "stderr":"", "returncode":0})()
+        self.assertTrue(agent._emulator_process())
+        self.assertEqual(run.call_args.args[0], ["pgrep", "-af", "emulator|qemu-system-"])
+
+    def test_duplicate_start_and_fixed_arguments(self):
+        lifecycle = Config({"artifact_directory":str(self.root/"life-artifacts2"), "permitted_operations":["ping","status","devices","emulator_status","start_emulator"], "emulator":str(self.root / "emulator")})
+        (self.root / "emulator").write_text("x")
+        agent = Agent(self.root / "lifecycle2", lifecycle)
+        with patch.object(agent, "_emulator_status", return_value={"ok":True,"state":"booting"}):
+            self.assertEqual(agent.handle({"id":"d","op":"start_emulator"})["state"], "already_running")
+        with patch.object(agent, "_emulator_status", return_value={"ok":True,"state":"stopped"}), patch("adbbridge.core.subprocess.Popen") as popen:
+            result = agent.handle({"id":"s","op":"start_emulator"})
+            self.assertEqual(result["state"], "starting")
+            self.assertEqual(popen.call_args.args[0], [str(self.root / "emulator"), "-avd", "silence-counterpart", "-gpu", "swiftshader_indirect", "-no-snapshot", "-no-boot-anim", "-no-audio"])
+
+    def test_start_failure_and_schema_remain_structured(self):
+        emulator = self.root / "emulator"
+        emulator.write_text("x")
+        emulator.chmod(0o700)
+        lifecycle = Config({"artifact_directory":str(self.root/"life-artifacts3"), "permitted_operations":["ping","status","devices","emulator_status","start_emulator"], "emulator":str(emulator)})
+        agent = Agent(self.root / "lifecycle3", lifecycle)
+        with patch.object(agent, "_emulator_status", return_value={"ok":True,"state":"stopped"}), patch("adbbridge.core.subprocess.Popen", side_effect=OSError("denied")):
+            with self.assertRaisesRegex(AgentError, "unable to start"): agent.handle({"id":"f","op":"start_emulator"})
+        with self.assertRaisesRegex(AgentError, "unknown request field"): agent.handle({"id":"x","op":"emulator_status","wait":True})
 
 if __name__ == "__main__": unittest.main()
