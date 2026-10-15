@@ -6,8 +6,9 @@ from pathlib import Path
 ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
 PACKAGE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+$")
 COMPONENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]*\/(?:\.)?[A-Za-z][A-Za-z0-9_.$]*$")
-READ_OPS = {"ping", "status", "devices"}
-MUTATION_OPS = {"install_apk", "launch_app", "logcat", "screenshot"}
+READ_OPS = {"ping", "status", "devices", "emulator_status"}
+MUTATION_OPS = {"install_apk", "launch_app", "logcat", "screenshot", "start_emulator"}
+REQUIRED_OPS = {"ping", "status", "devices"}
 
 class AgentError(Exception):
     def __init__(self, message, code="agent_error"):
@@ -27,8 +28,14 @@ class Config:
         self.apk_dirs = [Path(x).resolve() for x in data.get("allowed_apk_directories", [])]
         self.artifact_dir = Path(data.get("artifact_directory", Path.home() / ".gradle/adbbridge-artifacts")).resolve()
         self.packages, self.components = data.get("allowed_packages", []), data.get("allowed_components", {})
-        self.operations = set(data.get("permitted_operations", sorted(READ_OPS)))
-        if not self.operations <= READ_OPS | MUTATION_OPS or not READ_OPS <= self.operations: raise AgentError("invalid permitted operations", "config_invalid")
+        self.emulator_path = Path(data.get("emulator", "/home/user/Android/Sdk/emulator/emulator")).resolve()
+        self.avd_name = data.get("emulator_avd", "silence-counterpart")
+        self.boot_timeout = int(data.get("emulator_boot_timeout_seconds", 45))
+        self.emulator_env = {k: str(data[k]) for k in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR") if k in data}
+        if not self.emulator_path.is_absolute() or not isinstance(self.avd_name, str) or self.avd_name != "silence-counterpart" or not 1 <= self.boot_timeout <= 300: raise AgentError("invalid emulator lifecycle configuration", "config_invalid")
+        if any(k not in {"DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"} for k in self.emulator_env): raise AgentError("invalid emulator environment", "config_invalid")
+        self.operations = set(data.get("permitted_operations", sorted(REQUIRED_OPS)))
+        if not self.operations <= READ_OPS | MUTATION_OPS or not REQUIRED_OPS <= self.operations: raise AgentError("invalid permitted operations", "config_invalid")
         if any(not isinstance(x, str) or not PACKAGE_RE.fullmatch(x) for x in self.packages): raise AgentError("invalid allowed package", "config_invalid")
         if not isinstance(self.components, dict) or any(p not in self.packages or not isinstance(v, list) or any(not isinstance(c, str) or not COMPONENT_RE.fullmatch(c) or c.split("/", 1)[0] != p for c in v) for p, v in self.components.items()): raise AgentError("invalid allowed component", "config_invalid")
 
@@ -74,6 +81,44 @@ class Agent:
         result = self.adb_devices()
         if not any((fields := line.split())[:2] == ["emulator-5554", "device"] for line in result["stdout"].splitlines()): raise AgentError("emulator-5554 is not online", "device_unavailable")
 
+    def _emulator_process(self):
+        try:
+            result = subprocess.run(["pgrep", "-af", "emulator|qemu-system-"], text=True, capture_output=True, timeout=2, shell=False, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return any(f" -avd {self.config.avd_name}" in line or f" -avd {self.config.avd_name} " in line for line in result.stdout.splitlines())
+
+    def _boot_completed(self):
+        result = self._run(["-s", "emulator-5554", "shell", "getprop", "sys.boot_completed"], output_limit=128)
+        return result["exit_code"] == 0 and result["stdout"].strip() == "1"
+
+    def _emulator_status(self):
+        process = self._emulator_process()
+        try:
+            devices = self.adb_devices()["stdout"]
+        except AgentError as e:
+            devices = ""
+            adb_error = e.code
+        else:
+            adb_error = None
+        adb_state = next((line.split()[1] for line in devices.splitlines() if line.split()[:1] == ["emulator-5554"] and len(line.split()) > 1), "absent")
+        boot = False
+        if adb_state == "device":
+            try: boot = self._boot_completed()
+            except AgentError: pass
+        return {"ok": True, "avd": self.config.avd_name, "process": process, "adb_state": adb_state, "boot_completed": boot, "state": "ready" if boot else ("booting" if process or adb_state != "absent" else "stopped"), **({"adb_error": adb_error} if adb_error else {})}
+
+    def _start_emulator(self):
+        state = self._emulator_status()
+        if state["state"] == "ready": return {**state, "started": False, "state": "already_ready"}
+        if state["state"] == "booting": return {**state, "started": False, "state": "already_running"}
+        if not self.config.emulator_path.is_file(): raise AgentError("emulator executable is unavailable", "emulator_unavailable")
+        env = os.environ.copy(); env.update(self.config.emulator_env)
+        try:
+            subprocess.Popen([str(self.config.emulator_path), "-avd", self.config.avd_name, "-gpu", "swiftshader_indirect", "-no-snapshot", "-no-boot-anim", "-no-audio"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True, env=env)
+        except OSError as e: raise AgentError(f"unable to start emulator: {e}", "emulator_start_failed") from e
+        return {"ok": True, "avd": self.config.avd_name, "started": True, "state": "starting", "boot_timeout_seconds": self.config.boot_timeout}
+
     def _run(self, args, output_limit=None):
         try: result = subprocess.run([self.config.adb, *args], text=True, capture_output=True, timeout=self.config.timeout, shell=False, check=False)
         except subprocess.TimeoutExpired as e: raise AgentError("ADB command timed out", "timeout") from e
@@ -105,6 +150,8 @@ class Agent:
         if op == "ping": return {"ok": True, "agent": "adbbridge", "version": 2}
         if op == "status": return {"ok": True, "adb": self.config.adb, "allowed_devices": self.config.devices, "queue": str(self.queue), "artifact_directory": str(self.config.artifact_dir), "permitted_operations": sorted(self.config.operations), "adb_server": "localhost only; Smart Socket discovery is read-only; subprocess ADB may auto-start the configured server"}
         if op == "devices": result = self.adb_devices(); result["ok"] = True; return result
+        if op == "emulator_status": return self._emulator_status()
+        if op == "start_emulator": return self._start_emulator()
         if op == "install_apk":
             apk = self._apk(req)
             self._online()

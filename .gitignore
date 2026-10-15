@@ -1,9 +1,10 @@
-__pycache__/
-*.py[cod]
 *.egg-info/
-.venv/
-.pytest_cache/
-dist/
-build/
-queue/
 *.log
+*.py[cod]
+.idea/
+.pytest_cache/
+.venv/
+__pycache__/
+build/
+dist/
+queue/
