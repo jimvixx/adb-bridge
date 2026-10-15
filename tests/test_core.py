@@ -1,4 +1,4 @@
-import hashlib, json, tempfile, unittest
+import hashlib, json, subprocess, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from adbbridge.core import Agent, AgentError, Config
@@ -23,6 +23,62 @@ class Tests(unittest.TestCase):
     def test_ping_status_and_schema(self):
         self.assertTrue(self.req(op="ping")["ok"]); self.assertIn("artifact_directory", self.req(op="status"))
         with self.assertRaisesRegex(AgentError,"unknown request field"): self.req(op="ping", arbitrary=True)
+
+    @patch.object(Agent, "_online")
+    @patch.object(Agent, "_run", return_value={"exit_code": 0, "stdout": "", "stderr": ""})
+    def test_ui_fixed_argv(self, run, online):
+        ui = Config({"artifact_directory":str(self.root/"ui"), "permitted_operations":["ping","status","devices","tap","swipe","keyevent","input_text"]})
+        agent = Agent(self.root / "uiq", ui)
+        agent.handle({"id":"t","op":"tap","x":10,"y":20})
+        self.assertEqual(run.call_args.args[0], ["-s","emulator-5554","shell","input","tap","10","20"])
+        agent.handle({"id":"s","op":"swipe","x1":1,"y1":2,"x2":3,"y2":4,"duration_ms":50})
+        self.assertEqual(run.call_args.args[0], ["-s","emulator-5554","shell","input","swipe","1","2","3","4","50"])
+        agent.handle({"id":"k","op":"keyevent","keyevent":"BACK"})
+        self.assertEqual(run.call_args.args[0], ["-s","emulator-5554","shell","input","keyevent","BACK"])
+        agent.handle({"id":"i","op":"input_text","text":"Test 123!"})
+        self.assertEqual(run.call_args.args[0], ["-s","emulator-5554","shell","input","text","Test 123!"])
+
+    @patch.object(Agent, "_online")
+    @patch("adbbridge.core.subprocess.run")
+    def test_every_ui_operation_uses_allowlisted_device_and_shell_false(self, run, online):
+        run.return_value = type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        ui = Config({"artifact_directory":str(self.root/"ui-device"), "permitted_operations":["ping","status","devices","tap","swipe","keyevent","input_text"]})
+        agent = Agent(self.root / "ui-device-q", ui)
+        requests = [
+            {"id":"t","op":"tap","x":1,"y":2},
+            {"id":"s","op":"swipe","x1":1,"y1":2,"x2":3,"y2":4},
+            {"id":"k","op":"keyevent","keyevent":"ENTER"},
+            {"id":"i","op":"input_text","text":"hello world"},
+        ]
+        for request in requests:
+            agent.handle(request)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[1:3], ["-s", "emulator-5554"])
+            self.assertIs(run.call_args.kwargs["shell"], False)
+        for target in ("phone", "emulator-5556", "127.0.0.1:5555"):
+            with self.assertRaisesRegex(AgentError, "not allowlisted"):
+                agent.handle({**requests[0], "id":"bad", "target":target})
+        with self.assertRaisesRegex(AgentError, "unknown request field"):
+            agent.handle({**requests[0], "id":"bad-field", "adb_args":["-s", "phone"]})
+
+    @patch.object(Agent, "_online")
+    @patch("adbbridge.core.subprocess.run")
+    def test_input_text_rejects_remote_shell_metacharacters_before_execution(self, run, online):
+        ui = Config({"artifact_directory":str(self.root/"ui-text"), "permitted_operations":["ping","status","devices","input_text"]})
+        agent = Agent(self.root / "ui-text-q", ui)
+        for text in ("a;b", "$(id)", "`id`", "a|b", "a&b", "a'b", 'a"b', "a\nb", "100%", "a\\b", "a/b", "a(b)", "a=b"):
+            with self.subTest(text=text), self.assertRaisesRegex(AgentError, "unsupported characters"):
+                agent.handle({"id":"unsafe", "op":"input_text", "text":text})
+        run.assert_not_called()
+        agent.handle({"id":"safe", "op":"input_text", "text":"Hello, test 123!"})
+        run.assert_called_once_with([ui.adb, "-s", "emulator-5554", "shell", "input", "text", "Hello, test 123!"], text=True, capture_output=True, timeout=ui.timeout, shell=False, check=False)
+
+    def test_ui_disabled_and_validation(self):
+        with self.assertRaisesRegex(AgentError, "not permitted"): self.req(op="tap", x=1, y=1)
+        ui = Config({"artifact_directory":str(self.root/"ui2"), "permitted_operations":["ping","status","devices","tap","swipe","keyevent","input_text"]})
+        agent = Agent(self.root / "uiq2", ui)
+        for request in ({"id":"x","op":"tap","x":-1,"y":1}, {"id":"x","op":"tap","x":1080,"y":1}, {"id":"x","op":"swipe","x1":1,"y1":1,"x2":2,"y2":2,"duration_ms":0}, {"id":"x","op":"keyevent","keyevent":"POWER"}, {"id":"x","op":"input_text","text":"a; rm -rf /"}, {"id":"x","op":"input_text","text":"a"*121}, {"id":"x","op":"tap","x":1,"y":1,"text":"extra"}):
+            with self.assertRaises(AgentError): agent.handle(request)
     def test_target_and_operation_restrictions(self):
         with self.assertRaisesRegex(AgentError,"not allowlisted"): self.req(op="devices", target="phone")
         with self.assertRaisesRegex(AgentError,"not permitted"): Agent(self.root/"q2", Config({"allowed_devices":["emulator-5554"], "artifact_directory":str(self.root/"a2")})).handle({"id":"x","op":"install_apk"})
