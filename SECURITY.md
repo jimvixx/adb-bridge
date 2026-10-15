@@ -1,4 +1,4 @@
 # Security model
 ADBBridge treats the queue as untrusted. The host executable and JSON security configuration must be host-owned and not writable by the sandbox; the AI gets queue write access only. Queue files are validated, operations are allowlisted, responses are atomic, and no shell or arbitrary ADB arguments are accepted.
 
-Milestone 0 implements only `ping`, `status`, and read-only `devices`. Mutations are rejected. There is no ADB-server restart, listener, APK installation, shell command, or physical-device access policy. Future approval data from the same untrusted queue must never be sufficient authorization.
+The default configuration implements only `ping`, `status`, and read-only `devices`. UI mutations (`tap`, `swipe`, `keyevent`, `input_text`) are disabled unless a host operator explicitly adds them to `permitted_operations`; they use fixed argv and `shell=False`, and do not accept arbitrary ADB arguments. They are not a guarantee against harmful screen interactions: the first test must use a blank/synthetic conversation and must not press Send. Future approval data from the same untrusted queue must never be sufficient authorization.

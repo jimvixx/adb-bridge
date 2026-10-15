@@ -7,7 +7,9 @@ ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
 PACKAGE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+$")
 COMPONENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]*\/(?:\.)?[A-Za-z][A-Za-z0-9_.$]*$")
 READ_OPS = {"ping", "status", "devices", "emulator_status"}
-MUTATION_OPS = {"install_apk", "launch_app", "logcat", "screenshot", "start_emulator"}
+MUTATION_OPS = {"install_apk", "launch_app", "logcat", "screenshot", "start_emulator", "tap", "swipe", "keyevent", "input_text"}
+UI_OPS = {"tap", "swipe", "keyevent", "input_text"}
+KEYEVENTS = {"BACK", "HOME", "ENTER", "DEL"}
 REQUIRED_OPS = {"ping", "status", "devices"}
 
 class AgentError(Exception):
@@ -38,6 +40,8 @@ class Config:
         if not self.operations <= READ_OPS | MUTATION_OPS or not REQUIRED_OPS <= self.operations: raise AgentError("invalid permitted operations", "config_invalid")
         if any(not isinstance(x, str) or not PACKAGE_RE.fullmatch(x) for x in self.packages): raise AgentError("invalid allowed package", "config_invalid")
         if not isinstance(self.components, dict) or any(p not in self.packages or not isinstance(v, list) or any(not isinstance(c, str) or not COMPONENT_RE.fullmatch(c) or c.split("/", 1)[0] != p for c in v) for p, v in self.components.items()): raise AgentError("invalid allowed component", "config_invalid")
+        self.ui_width = int(data.get("ui_width", 1080)); self.ui_height = int(data.get("ui_height", 1920)); self.max_input_text = int(data.get("max_input_text", 120))
+        if not 1 <= self.ui_width <= 10000 or not 1 <= self.ui_height <= 10000 or not 1 <= self.max_input_text <= 1000: raise AgentError("invalid UI limits", "config_invalid")
 
 def load_config(path: Path) -> Config: return Config(json.loads(path.read_text(encoding="utf-8")))
 
@@ -51,9 +55,12 @@ class Agent:
         if not isinstance(req, dict) or not isinstance(req.get("id"), str) or not ID_RE.fullmatch(req["id"]): raise AgentError("invalid request id", "schema_invalid")
         op = req.get("op")
         if op not in self.config.operations: raise AgentError("operation not permitted", "operation_denied")
-        allowed = {"id", "op", "target", "apk_path", "sha256", "package", "component", "lines", "since"}
+        allowed = {"id", "op", "target", "apk_path", "sha256", "package", "component", "lines", "since", "x", "y", "x1", "y1", "x2", "y2", "duration_ms", "keyevent", "text"}
         if set(req) - allowed: raise AgentError("unknown request field", "schema_invalid")
         if req.get("target", "emulator-5554") != "emulator-5554": raise AgentError("target is not allowlisted", "target_denied")
+        fields = {"id", "op", "target"}
+        fields |= {"x", "y"} if op == "tap" else {"x1", "y1", "x2", "y2", "duration_ms"} if op == "swipe" else {"keyevent"} if op == "keyevent" else {"text"} if op == "input_text" else set()
+        if set(req) - fields and op in UI_OPS: raise AgentError("field is not valid for this operation", "schema_invalid")
         return op
 
     def _read_exact(self, sock, size):
@@ -134,6 +141,34 @@ class Agent:
         if len(result.stdout) > output_limit or len(result.stderr) > output_limit: raise AgentError("ADB output exceeds limit", "output_too_large")
         return result.returncode, result.stdout, result.stderr
 
+    def _coordinate(self, req, name):
+        value = req.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0: raise AgentError("coordinates must be non-negative integers", "schema_invalid")
+        return value
+
+    def _ui(self, req):
+        op = req["op"]
+        if op == "tap":
+            x, y = self._coordinate(req, "x"), self._coordinate(req, "y")
+            if x >= self.config.ui_width or y >= self.config.ui_height: raise AgentError("coordinate is outside display bounds", "schema_invalid")
+            args = ["-s", "emulator-5554", "shell", "input", "tap", str(x), str(y)]
+        elif op == "swipe":
+            x1, y1 = self._coordinate(req, "x1"), self._coordinate(req, "y1"); x2, y2 = self._coordinate(req, "x2"), self._coordinate(req, "y2")
+            if any(v >= limit for v, limit in ((x1, self.config.ui_width), (x2, self.config.ui_width), (y1, self.config.ui_height), (y2, self.config.ui_height))): raise AgentError("coordinate is outside display bounds", "schema_invalid")
+            duration = req.get("duration_ms", 300)
+            if not isinstance(duration, int) or isinstance(duration, bool) or not 1 <= duration <= 10000: raise AgentError("invalid swipe duration", "schema_invalid")
+            args = ["-s", "emulator-5554", "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration)]
+        elif op == "keyevent":
+            key = req.get("keyevent")
+            if not isinstance(key, str) or key not in KEYEVENTS: raise AgentError("keyevent is not allowlisted", "schema_invalid")
+            args = ["-s", "emulator-5554", "shell", "input", "keyevent", key]
+        else:
+            value = req.get("text")
+            if not isinstance(value, str) or not 1 <= len(value) <= self.config.max_input_text or not re.fullmatch(r"[A-Za-z0-9 .,!?@_+\-]+", value): raise AgentError("text contains unsupported characters or length", "schema_invalid")
+            # This conservative alphabet avoids adb input text escaping ambiguity and shell metacharacters.
+            args = ["-s", "emulator-5554", "shell", "input", "text", value]
+        return {"ok": True, **self._run(args)}
+
     def _apk(self, req):
         raw, digest = req.get("apk_path"), req.get("sha256")
         if not isinstance(raw, str) or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest): raise AgentError("invalid APK path or sha256", "schema_invalid")
@@ -157,6 +192,7 @@ class Agent:
             self._online()
             return {"ok": True, **self._run(["-s", "emulator-5554", "install", "--no-streaming", "-r", str(apk)])}
         self._online()
+        if op in UI_OPS: return self._ui(req)
         if op == "launch_app":
             package, component = req.get("package"), req.get("component")
             if package not in self.config.packages or component not in self.config.components.get(package, []): raise AgentError("package or component is not allowlisted", "component_denied")
