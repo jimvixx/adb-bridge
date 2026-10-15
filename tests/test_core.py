@@ -86,7 +86,10 @@ class Tests(unittest.TestCase):
             self.assertEqual(popen.call_args.args[0], [str(self.root / "emulator"), "-avd", "silence-counterpart", "-gpu", "swiftshader_indirect", "-no-snapshot", "-no-boot-anim", "-no-audio"])
 
     def test_start_failure_and_schema_remain_structured(self):
-        lifecycle = Config({"artifact_directory":str(self.root/"life-artifacts3"), "permitted_operations":["ping","status","devices","emulator_status","start_emulator"]})
+        emulator = self.root / "emulator"
+        emulator.write_text("x")
+        emulator.chmod(0o700)
+        lifecycle = Config({"artifact_directory":str(self.root/"life-artifacts3"), "permitted_operations":["ping","status","devices","emulator_status","start_emulator"], "emulator":str(emulator)})
         agent = Agent(self.root / "lifecycle3", lifecycle)
         with patch.object(agent, "_emulator_status", return_value={"ok":True,"state":"stopped"}), patch("adbbridge.core.subprocess.Popen", side_effect=OSError("denied")):
             with self.assertRaisesRegex(AgentError, "unable to start"): agent.handle({"id":"f","op":"start_emulator"})
