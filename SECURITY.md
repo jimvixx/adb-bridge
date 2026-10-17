@@ -11,7 +11,7 @@ The maintained development branch is `main`. Project metadata currently identifi
 ## Intended trust model
 
 - An isolated tool or AI agent has access to a **shared JSON queue**, not to unrestricted host ADB.
-- The **request producer** needs write access to the queue and read access to responses; the **host worker** needs separate access to its queue, configuration and tools. A producer sandbox may require its own filesystem approval. The worker's systemd `ReadWritePaths` does not grant write access to the producer.
+- The **request producer** needs write access to the queue and read access to responses; the **host worker** needs separate access to its queue, configuration and tools. A producer sandbox may require its own filesystem approval. The worker's systemd `ReadWritePaths` does not grant write access to the producer. In a tested ChatGPT Work setup, standard `:workspace` alone denied queue writes, but narrowly approved filesystem access enabled `ping`/`status` without any custom permission profile. Client-specific approval behavior is not guaranteed.
 - A Python worker on the Linux host reads that queue and validates requests against an operator-controlled configuration.
 - **Exactly one emulator serial** is permitted per worker and must be explicitly listed in `allowed_devices`; a serial other than the configured value is rejected. Physical-device serials are not accepted by the current validation.
 - AVD lifecycle commands use the **host-configured** `emulator_avd` value, validated as a conservative AVD name; incoming requests cannot select other AVDs or flags.

@@ -75,7 +75,7 @@ Run the worker in the foreground:
   --config "$HOME/.config/adbbridge/config.json"
 ```
 
-The [technical guide](docs/USER_GUIDE.md) explains the optional user-service deployment, [sandboxed-client permissions](docs/USER_GUIDE.md#63-sandboxed-clients-and-filesystem-permissions), writable AVD directories, and the full request protocol. **ADBBridge does not require a specific AI-agent permission profile**; each producer must obtain the needed queue access through its own sandbox or approval mechanism.
+The [technical guide](docs/USER_GUIDE.md) explains the optional user-service deployment, [sandboxed-client permissions](docs/USER_GUIDE.md#63-sandboxed-clients-and-filesystem-permissions), writable AVD directories, and the full request protocol. **ADBBridge does not require a specific AI-agent permission profile**; each producer must obtain the needed queue access through its own sandbox or approval mechanism. A Linux ChatGPT Work integration test confirmed that the custom profile could be removed entirely: the standard `:workspace` profile with **Approve for me** successfully submitted `ping` and `status` after additional filesystem access was granted. This is an optional client integration example, not a prerequisite or a promise of automatic approval.
 
 ## First request
 

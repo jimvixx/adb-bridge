@@ -311,7 +311,20 @@ The worker's `systemd` `ReadWritePaths` allowance applies **only to that service
 
 A queue located outside the producer's writable workspace (for example `~/.gradle/adbbridge-queue`) may be readable but not writable. In a filesystem sandbox, a failed request-file creation can report **`Read-only file system`** even when the Unix ownership and mode bits would normally permit writes. Do not try to fix a sandbox mount restriction with `chmod 777`, `sudo`, or by disabling the sandbox. Instead, use a supported, narrowly scoped filesystem approval, configure a suitable client-specific permission for the queue, or choose a shared queue location that both the client and worker can access without weakening the host policy.
 
-**ChatGPT Work / Codex example (optional integration).** During a Linux integration test, ChatGPT was configured with `default_permissions = ":workspace"` and Work used **Approve for me**, without selecting a custom `smsecure-local` profile. Initially, the agent could read the queue but received `Read-only file system` when trying to write to it. A subsequent test using Work's on-demand filesystem approval mechanism succeeded: write access became available, and fresh `ping` and `status` requests returned `status: "ok"`. No interactive approval dialog appeared during that particular test; the approval was automatically granted. **Approval policy and behavior may differ by installation, session or environment.** This observation is not a promise of unattended or automatic access for other users.
+**ChatGPT Work / Codex (tested optional integration).** A follow-up Linux test was completed **after removing the entire application-specific `smsecure-local` profile** from `~/.codex/config.toml` and rebooting the host. The Codex configuration retained `default_permissions = ":workspace"`; a new ChatGPT Work session used **Approve for me**. This was an end-to-end check of the *absence* of the custom profile, rather than merely leaving it unselected.
+
+| Capability | Standard `:workspace` sandbox | With Work's supported approval mechanism |
+| --- | --- | --- |
+| Read ADBBridge repository | Allowed in the tested session | Not needed |
+| Read test application repository | Allowed in the tested session | Not needed |
+| Create/delete a temporary file in the test application repository | Denied: `Read-only file system` | Succeeded |
+| Read ADBBridge queue | Allowed | Not needed |
+| Write to ADBBridge queue | Denied: `Read-only file system` | Succeeded |
+| Submit fresh `ping` and `status` through the queue | Not possible without queue write access | Both passed (`status: "ok"`, matching response IDs) |
+
+The test created and removed harmless temporary files, then verified that both repositories had clean Git working trees and that probe files and test responses had been removed. No Android device, emulator, app, service or ADB configuration was changed. The earlier on-demand approval test **did not display an interactive prompt**: additional access was automatically granted under **Approve for me**. Do not infer from that observation that access will be approved automatically, retained between sessions or available in every installation.
+
+**Result:** ADBBridge does **not** require `smsecure-local`, any other named custom Codex permission profile, or a project-specific network permission. The proven requirement is narrower: the producer must be able to create requests and read responses in the configured queue, either within its normal writable scope or after a client-supported approval. Standard `:workspace` *alone* did **not** permit queue writes at the tested path. This test does not establish that every other Work session or third-party client will have the same filesystem access.
 
 For reliable setup:
 
@@ -320,7 +333,7 @@ For reliable setup:
 3. Submit `ping` and `status` using the exact schemas above, and verify fresh response IDs. These checks require no emulator or SMS/MMS interaction.
 4. Keep the host worker's separate allowlists and systemd restrictions in place; producer permissions are **not** a substitute for ADBBridge request validation.
 
-Do not remove or change global Codex configuration settings solely to operate ADBBridge. ADBBridge itself has no dependency on `~/.codex/config.toml`; if a client requires configuration changes, follow the documentation for **that client and installed version**, keep a rollback copy, and test its startup independently.
+ADBBridge does not read `~/.codex/config.toml` and has no dependency on its contents. **Do not remove required Codex configuration keys or change global permission defaults just to enable ADBBridge.** If you choose to change client settings, follow the instructions for your installed client version, back up the configuration, and verify a clean application start after a full host reboot if needed. The successful `:workspace` test above is an observation about one client environment, **not** an ADBBridge setup requirement.
 
 ## 7. Operation reference
 
