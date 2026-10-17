@@ -11,6 +11,7 @@ The maintained development branch is `main`. Project metadata currently identifi
 ## Intended trust model
 
 - An isolated tool or AI agent has access to a **shared JSON queue**, not to unrestricted host ADB.
+- The **request producer** needs write access to the queue and read access to responses; the **host worker** needs separate access to its queue, configuration and tools. A producer sandbox may require its own filesystem approval. The worker's systemd `ReadWritePaths` does not grant write access to the producer.
 - A Python worker on the Linux host reads that queue and validates requests against an operator-controlled configuration.
 - **Exactly one emulator serial** is permitted per worker and must be explicitly listed in `allowed_devices`; a serial other than the configured value is rejected. Physical-device serials are not accepted by the current validation.
 - AVD lifecycle commands use the **host-configured** `emulator_avd` value, validated as a conservative AVD name; incoming requests cannot select other AVDs or flags.
@@ -38,7 +39,7 @@ Changing serials or AVD names through **trusted host configuration** is an inten
 ## Deployment guidelines
 
 1. Keep the installed worker, config and systemd unit **outside untrusted writable workspace roots**. Do not use an editable pip install for the production-like worker.
-2. Use a private queue. Do not expose it through a public network share or public API endpoint.
+2. Use a private queue. Do not expose it through a public network share or public API endpoint. Client-side permission approvals should be scoped to the queue rather than all of the home directory; queue write access permits every operation enabled by the worker policy.
 3. Restrict operations to a disposable emulator and synthetic test data. Avoid real accounts, recipients and credentials.
 4. Prefer an `artifact_directory` **inside a service-writable path**; the provided user service allows writes to the queue.
 5. Review `systemd/adbbridge.service`: `ProtectHome=read-only` and `ProtectSystem=strict` are enabled. Emulator launch requires a carefully scoped writable AVD-data path, not wholesale removal of protections.
@@ -49,4 +50,4 @@ Changing serials or AVD names through **trusted host configuration** is an inten
 
 `logcat`, screenshots, responses and APKs can contain phone numbers, message bodies, account data and other private information. Inspect and redact before sharing reports. If the active Android window sets `FLAG_SECURE`, screen capture may return a black image; that does not prove the application failed to render.
 
-See the [User & Technical Guide](docs/USER_GUIDE.md) for deployment and protocol details.
+See the [User & Technical Guide](docs/USER_GUIDE.md) for deployment, protocol and [sandboxed-client permission requirements](docs/USER_GUIDE.md#63-sandboxed-clients-and-filesystem-permissions).

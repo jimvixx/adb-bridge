@@ -2,7 +2,7 @@
 
 A practical reference for installing and operating **ADBBridge** on a Linux development host. ADBBridge provides a small JSON file-queue API for isolated tools that cannot directly access the host Android Debug Bridge (ADB) server.
 
-**Scope of this documentation:** the accompanying **portability patch** and generic configuration. Apply that code patch before using a custom device serial or AVD name. A single emulator is permitted per worker; physical devices, remote ADB targets and arbitrary shell commands remain unsupported. The currently deployed copy on your computer will not change until you separately install this version.
+**Current scope:** configurable emulator serial and AVD name, with one explicitly allowlisted emulator per worker. Physical devices, remote ADB targets and arbitrary shell commands remain unsupported. The installed worker reads its own host configuration; changing a source checkout does not update an already installed package.
 
 See the [README](../README.md) for project rationale and [Security](../SECURITY.md) for the threat model.
 
@@ -55,8 +55,7 @@ adb-bridge/
 ├── systemd/
 │   └── adbbridge.service      # Optional user service template
 ├── tests/
-│   ├── test_core.py           # Existing regression tests
-│   └── test_portability.py    # Tests for configurable serial and AVD
+│   └── test_core.py           # Regression and portability tests
 ├── docs/
 │   └── USER_GUIDE.md
 ├── .github/workflows/tests.yml
@@ -221,7 +220,7 @@ Only add `install_apk`, `launch_app` or UI actions to `permitted_operations` if 
 | `max_input_text` | 120; 1–1000 | Maximum text length, additionally subject to character allowlist |
 | `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` | Inherit host environment unless configured | Optional graphical-environment overrides for emulator |
 
-**Compatibility:** `allowed_devices` and `emulator_avd` have become truly configurable **in the accompanying patch**. Previously `main` rejected any serial other than `emulator-5554` and any AVD other than `silence-counterpart`. Do not deploy new example settings onto the unpatched installed program.
+**Compatibility:** `allowed_devices` and `emulator_avd` are configurable in the current implementation. After upgrading the source checkout, separately update the installed worker and verify its configuration via `status`.
 
 **Service lifecycle:** the worker reads config at startup. Restart to apply updates, at a time when a child emulator may be safely stopped. Changes to the systemd **unit** also require `systemctl --user daemon-reload`.
 
@@ -298,6 +297,30 @@ PY
 ```
 
 Poll the printed response file path, parse it, and verify its `id`. This is a file-queue protocol, not stdin commands to the running worker.
+
+### 6.3 Sandboxed clients and filesystem permissions
+
+ADBBridge is independent of any particular AI agent, IDE or sandbox. It **does not require a ChatGPT Work, Codex or application-specific permission profile**. Its file-queue transport does, however, require filesystem access on *both* sides:
+
+| Actor | Required access |
+| --- | --- |
+| Request producer (AI agent, test runner or other client) | Create a temporary JSON file and atomically rename it into `<queue>/requests/`; read `<queue>/responses/<id>.json`; read `<artifact_directory>` if consuming screenshots. |
+| Host ADBBridge worker | Read and remove requests, create responses and artifacts, and access host ADB/emulator executables as configured. |
+
+The worker's `systemd` `ReadWritePaths` allowance applies **only to that service**. It does not grant permission to the sandboxed producer. Conversely, giving the producer write access to the queue does not grant unrestricted host filesystem access or direct ADB access. It **does** allow the producer to invoke any operation already enabled in the host allowlist; treat queue write access as a meaningful capability.
+
+A queue located outside the producer's writable workspace (for example `~/.gradle/adbbridge-queue`) may be readable but not writable. In a filesystem sandbox, a failed request-file creation can report **`Read-only file system`** even when the Unix ownership and mode bits would normally permit writes. Do not try to fix a sandbox mount restriction with `chmod 777`, `sudo`, or by disabling the sandbox. Instead, use a supported, narrowly scoped filesystem approval, configure a suitable client-specific permission for the queue, or choose a shared queue location that both the client and worker can access without weakening the host policy.
+
+**ChatGPT Work / Codex example (optional integration).** During a Linux integration test, ChatGPT was configured with `default_permissions = ":workspace"` and Work used **Approve for me**, without selecting a custom `smsecure-local` profile. Initially, the agent could read the queue but received `Read-only file system` when trying to write to it. A subsequent test using Work's on-demand filesystem approval mechanism succeeded: write access became available, and fresh `ping` and `status` requests returned `status: "ok"`. No interactive approval dialog appeared during that particular test; the approval was automatically granted. **Approval policy and behavior may differ by installation, session or environment.** This observation is not a promise of unattended or automatic access for other users.
+
+For reliable setup:
+
+1. Verify the client can **write atomically** under `<queue>/requests` and read `<queue>/responses` (and screenshots if needed), not merely list the queue directory.
+2. If access is denied, use the client's supported approval mechanism or narrowly scoped permission configuration. Avoid global write grants for unrelated source trees or home directories.
+3. Submit `ping` and `status` using the exact schemas above, and verify fresh response IDs. These checks require no emulator or SMS/MMS interaction.
+4. Keep the host worker's separate allowlists and systemd restrictions in place; producer permissions are **not** a substitute for ADBBridge request validation.
+
+Do not remove or change global Codex configuration settings solely to operate ADBBridge. ADBBridge itself has no dependency on `~/.codex/config.toml`; if a client requires configuration changes, follow the documentation for **that client and installed version**, keep a rollback copy, and test its startup independently.
 
 ## 7. Operation reference
 
@@ -539,6 +562,7 @@ AI tool requests should use **only the shared queue**. Do not call `adb` inside 
 | Black PNG | May be app's Android `FLAG_SECURE` setting; compare home screen capture. |
 | `status: ok` but install/launch failed | Inspect `result.exit_code` and `result.stderr`. |
 | `input_text` fails | Check conservative alphabet, text length and target field focus. |
+| Producer can read queue but writes fail with `Read-only file system` | This can be a **producer sandbox mount restriction**, not Unix file-mode permissions or the worker allowlist. Request narrowly scoped client-side filesystem approval or use an allowed shared queue location; see [Sandboxed clients and filesystem permissions](#63-sandboxed-clients-and-filesystem-permissions). |
 | Screenshot path is inaccessible to AI tool | Artifact is on host; export a copy into a designated accessible directory, not by broadening all home permissions. |
 
 ## 11. Upgrade and rollback
@@ -576,6 +600,6 @@ python3 -m compileall -q adbbridge tests
 git diff --check
 ```
 
-CI runs Python 3.11 unit tests. Unit mocks verify request handling and fixed argv; **they do not replace real emulator integration tests**. A fresh manual integration test should exercise a different configured AVD/serial after the portability patch is installed, and should preserve user data.
+CI runs Python 3.11 unit tests. Unit mocks verify request handling and fixed argv; **they do not replace real emulator integration tests**. A fresh manual integration test should verify the configured AVD/serial, including alternative values where possible, and should preserve user data.
 
 ADBBridge intentionally remains **one-emulator-at-a-time**, even though its selected emulator and AVD are now configurable. Support for multiple simultaneous emulators, arbitrary real Android devices, a general device command shell, and authenticated cross-UID approval infrastructure are **not implemented**. There is no dependency on any particular Android application or AI service.

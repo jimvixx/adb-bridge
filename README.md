@@ -46,7 +46,7 @@ No HTTP server, cloud account, vendor-specific integration, or application-speci
 
 - Linux with **Python 3.11+**, `venv`, Android SDK Platform Tools, and an accessible host ADB server.
 - Optional Android Emulator and an **existing AVD** for `start_emulator`.
-- A shared writable directory for producer requests and worker responses.
+- A shared queue whose `requests/` directory is **writable by the producer** and whose `responses/` directory is readable by it; sandboxed tools may require explicit filesystem approval. See [queue permissions](docs/USER_GUIDE.md#63-sandboxed-clients-and-filesystem-permissions).
 - Optional `systemd --user` for background operation.
 
 ## Quick start
@@ -75,7 +75,7 @@ Run the worker in the foreground:
   --config "$HOME/.config/adbbridge/config.json"
 ```
 
-The [technical guide](docs/USER_GUIDE.md) explains the optional user-service deployment, permissions, writable AVD directories, and the full request protocol.
+The [technical guide](docs/USER_GUIDE.md) explains the optional user-service deployment, [sandboxed-client permissions](docs/USER_GUIDE.md#63-sandboxed-clients-and-filesystem-permissions), writable AVD directories, and the full request protocol. **ADBBridge does not require a specific AI-agent permission profile**; each producer must obtain the needed queue access through its own sandbox or approval mechanism.
 
 ## First request
 
